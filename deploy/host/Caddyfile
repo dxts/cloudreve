@@ -1,0 +1,16 @@
+# Installed to /mnt/HC_Volume_107333377/cloudreve/caddy/Caddyfile by deploy.sh.
+# SITE_ADDRESS comes from the caddy.container unit.
+
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	reverse_proxy cloudreve:5212 {
+		# Do not buffer responses: file downloads and previews stream straight through.
+		flush_interval -1
+	}
+
+	log {
+		output stderr
+		format console
+	}
+}

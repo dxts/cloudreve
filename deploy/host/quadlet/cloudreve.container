@@ -1,0 +1,50 @@
+# Cloudreve application server, run rootless by the `cloudreve` user via Quadlet.
+# Installed to ~cloudreve/.config/containers/systemd/ by deploy.sh; becomes
+# cloudreve.service in that user's systemd instance.
+#
+# Configuration: Cloudreve defaults to SQLite (data/cloudreve.db) and an in-memory cache
+# when no [Database] or [Redis] section is configured, which is exactly what we want.
+# It writes its own data/conf.ini on first start (including a generated SessionSecret),
+# so we never ship that file; the few settings we need are env overrides.
+
+[Unit]
+Description=Cloudreve
+Wants=network-online.target
+After=network-online.target
+# Data lives on the attached Hetzner volume; do not start before it is mounted.
+RequiresMountsFor=/mnt/HC_Volume_107333377
+
+[Container]
+Image=ghcr.io/dvorinka/cloudreve:v4.23.7-amd64
+ContainerName=cloudreve
+Network=cloudreve.network
+
+# Persistent state: SQLite DB, conf.ini, uploads, thumbnails, temp.
+Volume=/mnt/HC_Volume_107333377/cloudreve/data:/cloudreve/data
+
+Environment=TZ=UTC
+# Trust X-Forwarded-For: the only thing in front of us is Caddy on the private network.
+Environment=CR_CONF_System.ProxyHeader=X-Forwarded-For
+Environment=CR_CONF_System.LogLevel=info
+# Default settings applied on the very first start only (when the settings table is
+# seeded); after that they are managed in the admin UI.
+Environment=CR_SETTING_DEFAULT_siteURL=https://drive.offlike.net
+Environment=CR_SETTING_DEFAULT_siteName=Drive
+
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:5212/api/v4/site/ping
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=30s
+# Only report "started" to systemd once the health check passes, so caddy's
+# After= ordering and deploy.sh's wait are meaningful.
+Notify=healthy
+
+[Service]
+Restart=always
+RestartSec=5
+# First start pulls a ~1 GB image.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

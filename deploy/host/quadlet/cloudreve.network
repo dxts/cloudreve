@@ -1,0 +1,5 @@
+# Private network shared by the Cloudreve and Caddy containers. Caddy reaches the app
+# as http://cloudreve:5212 by container name; nothing on this network is published
+# except what Caddy exposes.
+[Network]
+NetworkName=cloudreve

@@ -1,0 +1,9 @@
+# Secrets: only the example is committed.
+.envrc
+
+# OpenTofu local state and provider cache. The lock file IS committed.
+tofu/.terraform/
+tofu/*.tfstate
+tofu/*.tfstate.*
+tofu/*.tfplan
+tofu/crash.log

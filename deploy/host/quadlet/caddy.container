@@ -1,0 +1,35 @@
+# Caddy: TLS termination with automatic Let's Encrypt certificates, reverse proxy to
+# Cloudreve over the private network. Runs rootless; binding 80/443 is allowed by the
+# net.ipv4.ip_unprivileged_port_start sysctl set in bootstrap.sh.
+
+[Unit]
+Description=Caddy reverse proxy for Cloudreve
+Wants=network-online.target cloudreve.service
+After=network-online.target cloudreve.service
+RequiresMountsFor=/mnt/HC_Volume_107333377
+
+[Container]
+Image=docker.io/library/caddy:2
+ContainerName=caddy
+Network=cloudreve.network
+
+PublishPort=80:80
+PublishPort=443:443
+PublishPort=443:443/udp
+
+Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+# Certificates and ACME account live in /data; losing them only costs a re-issue.
+Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/data:/data
+Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/config:/config
+
+Environment=SITE_ADDRESS=drive.offlike.net
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+# Reload Caddyfile without dropping connections: systemctl --user reload caddy
+ExecReload=/usr/bin/podman exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+[Install]
+WantedBy=default.target

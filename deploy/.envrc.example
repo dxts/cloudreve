@@ -1,0 +1,22 @@
+# Copy to deploy/.envrc (gitignored) and fill in the values, then `source deploy/.envrc`
+# (or let direnv load it). Nothing in here is ever read by the server; these are only
+# used by `tofu` and `deploy.sh` running on your machine.
+
+# Hetzner Cloud API token for the project that holds the server.
+# Read-write, since tofu creates the firewall. The hcloud CLI already has one in
+# ~/.config/hcloud/cli.toml under the active context; this pulls it out of there so you
+# don't have to keep two copies. Replace with a literal token if you prefer.
+export HCLOUD_TOKEN="$(python3 -c '
+import tomllib, pathlib
+c = tomllib.loads(pathlib.Path.home().joinpath(".config/hcloud/cli.toml").read_text())
+print(next(x["token"] for x in c["contexts"] if x["name"] == c["active_context"]))
+')"
+
+# Porkbun API credentials. Create under Account -> API Access in the Porkbun dashboard,
+# then on the offlike.net domain page enable "API Access" (off per domain by default).
+export PORKBUN_API_KEY="pk1_..."
+export PORKBUN_SECRET_KEY="sk1_..."
+
+# Deploy target. The server's root user, reachable with the "macbook work" key.
+export DEPLOY_HOST="root@178.105.142.75"
+export DEPLOY_SSH_KEY="$HOME/.ssh/hetzner_ed25519"
