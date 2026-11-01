@@ -7,6 +7,7 @@ needs nothing but sshd. Standard library only, Python 3.9+.
     source deploy/.envrc
     deploy/deploy.py bootstrap     one-time host setup: podman, service user, dirs, sysctls
     deploy/deploy.py deploy        push quadlet units + Caddyfile, restart, wait for health
+    deploy/deploy.py upgrade       apply pending OS updates now, reboot if required
     deploy/deploy.py status        unit and container status
     deploy/deploy.py logs [unit]   follow logs (cloudreve by default, or caddy)
     deploy/deploy.py ssh [cmd...]  shell on the host
@@ -78,32 +79,43 @@ class Remote:
     def output(self, command: str) -> str:
         return self.run(command, capture=True).stdout.strip()
 
-    def succeeds(self, command: str) -> bool:
-        return self.run(command, check=False, capture=True).returncode == 0
+    def succeeds(self, command: str, stdin: Optional[str] = None) -> bool:
+        return self.run(command, check=False, capture=True, stdin=stdin).returncode == 0
 
     def write_file(self, path: str, content: str, mode: str = "644",
-                   owner: str = "root") -> None:
-        """Write a file atomically (temp file, then move) with the given mode and owner."""
-        tmp = f"{path}.tmp"
+                   owner: str = "root") -> bool:
+        """Write a file atomically (temp file, then move) with the given mode and owner.
+        Returns True if the content changed, so callers can restart only what they must."""
         q = shlex.quote
+        unchanged = self.succeeds(f"cmp -s {q(path)} - ", stdin=content)
+        if unchanged:
+            return False
+        tmp = f"{path}.tmp"
         self.run(
             f"cat > {q(tmp)} && chmod {mode} {q(tmp)} && chown {owner}:{owner} {q(tmp)}"
             f" && mv {q(tmp)} {q(path)}",
             stdin=content,
         )
+        return True
 
-    def push_dir(self, source: Path, destination: str, owner: str, mode: str = "644") -> None:
+    def push_dir(self, source: Path, destination: str, owner: str,
+                 mode: str = "644") -> set[str]:
         """Mirror the files of a local directory (not recursive) into a remote directory,
-        deleting remote files that no longer exist locally."""
+        deleting remote files that no longer exist locally. Returns the names of files
+        that were added, changed or removed."""
         files = sorted(p for p in source.iterdir() if p.is_file())
-        for path in files:
-            self.write_file(f"{destination}/{path.name}", path.read_text(), mode, owner)
+        changed = {
+            path.name
+            for path in files
+            if self.write_file(f"{destination}/{path.name}", path.read_text(), mode, owner)
+        }
         keep = " ".join(shlex.quote(p.name) for p in files)
-        self.run(
+        removed = self.output(
             f"cd {shlex.quote(destination)} && for f in *; do"
-            f' case " {keep} " in *" $f "*) ;; *) echo "removing stale $f"; rm -f -- "$f";; esac;'
+            f' case " {keep} " in *" $f "*) ;; *) echo "$f"; rm -f -- "$f";; esac;'
             " done"
         )
+        return changed | set(removed.split())
 
     def as_user_systemctl(self, *args: str, check: bool = True,
                           capture: bool = False) -> subprocess.CompletedProcess:
@@ -140,6 +152,32 @@ SystemMaxUse=500M
 APT_AUTO_UPGRADES = """\
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+"""
+
+# Security updates that need a reboot (kernel, libc) get one at night rather than waiting
+# for someone to notice. Containers come back on their own via linger + Restart=always.
+APT_AUTO_REBOOT = """\
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+"""
+
+# Keys only. Root has a locked password and the service user has none, so password auth
+# was already unusable, but leaving it enabled still feeds the brute-force bots a
+# codepath. Written as a drop-in so Ubuntu's own sshd_config stays untouched.
+SSHD_HARDENING = """\
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+X11Forwarding no
+AllowAgentForwarding no
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
 """
 
 
@@ -182,8 +220,21 @@ def bootstrap(remote: Remote) -> None:
     remote.write_file("/etc/systemd/journald.conf.d/50-size.conf", JOURNALD_SIZE_CAP)
     remote.run("systemctl restart systemd-journald")
 
-    step("Enabling unattended security upgrades")
+    step("Enabling unattended security upgrades with automatic reboot")
     remote.write_file("/etc/apt/apt.conf.d/20auto-upgrades", APT_AUTO_UPGRADES)
+    remote.write_file("/etc/apt/apt.conf.d/52unattended-upgrades-local", APT_AUTO_REBOOT)
+
+    step("Hardening sshd: keys only")
+    remote.write_file("/etc/ssh/sshd_config.d/10-hardening.conf", SSHD_HARDENING)
+    # Validate before reloading so a typo cannot lock us out; reload keeps this session.
+    remote.run("sshd -t && systemctl reload ssh")
+    # A fresh connection proves the key path still works after the reload.
+    effective = remote.output(
+        "sshd -T | grep -E '^(passwordauthentication|permitrootlogin) '"
+    )
+    print(effective)
+    if "passwordauthentication no" not in effective:
+        sys.exit("sshd still accepts passwords; check /etc/ssh/sshd_config.d/")
 
     step("Bootstrap complete")
     print("podman:", remote.output("podman --version"))
@@ -200,16 +251,29 @@ UNITS = ["cloudreve.service", "caddy.service"]
 
 def deploy(remote: Remote) -> None:
     step("Pushing quadlet units and Caddyfile")
-    remote.push_dir(HERE / "host" / "quadlet", QUADLET_DIR, owner=APP_USER)
-    remote.write_file(f"{APP_ROOT}/caddy/Caddyfile", (HERE / "host" / "Caddyfile").read_text(),
-                      owner=APP_USER)
+    changed_units = remote.push_dir(HERE / "host" / "quadlet", QUADLET_DIR, owner=APP_USER)
+    caddyfile_changed = remote.write_file(
+        f"{APP_ROOT}/caddy/Caddyfile", (HERE / "host" / "Caddyfile").read_text(), owner=APP_USER
+    )
 
-    step("Reloading and restarting units")
-    remote.as_user_systemctl("daemon-reload")
-    for unit in UNITS:
-        remote.as_user_systemctl("restart", unit)
+    # Restart only what changed. A quadlet change restarts that unit (a few seconds of
+    # downtime for cloudreve; caddy returns 502 meanwhile). A Caddyfile-only change is a
+    # live reload with no dropped connections. Nothing changed: leave everything alone.
+    first_run = not remote.succeeds(f"systemctl --user --machine={APP_USER}@ cat cloudreve.service")
+    if changed_units or first_run:
+        step(f"Reloading units and restarting: {', '.join(sorted(changed_units)) or 'all (first run)'}")
+        remote.as_user_systemctl("daemon-reload")
+        for unit in UNITS:
+            if first_run or unit.replace(".service", ".container") in changed_units \
+                    or "cloudreve.network" in changed_units:
+                remote.as_user_systemctl("restart", unit)
+    elif caddyfile_changed:
+        step("Reloading caddy configuration (no restart)")
+        remote.as_user_systemctl("reload", "caddy.service")
+    else:
+        step("Nothing changed; services left running")
 
-    step("Waiting for cloudreve to become healthy (first start pulls a ~1 GB image)")
+    step("Waiting for cloudreve to be healthy (first start pulls a ~1 GB image)")
     deadline = time.monotonic() + 10 * 60
     while time.monotonic() < deadline:
         state = remote.as_user_systemctl("is-active", "cloudreve.service",
@@ -235,6 +299,39 @@ Deployed. If this is the first deploy:
     )
 
 
+def upgrade(remote: Remote) -> None:
+    """Apply all pending OS updates now and reboot if the kernel or libc changed."""
+    step("Upgrading packages")
+    remote.run(
+        "export DEBIAN_FRONTEND=noninteractive && apt-get update -q"
+        " && apt-get dist-upgrade -y -q && apt-get autoremove -y -q"
+    )
+    if not remote.succeeds("test -e /var/run/reboot-required"):
+        print("no reboot required")
+        return
+
+    step("Rebooting (reboot required by the upgrade)")
+    remote.run("systemctl reboot", check=False)
+    time.sleep(15)
+    deadline = time.monotonic() + 5 * 60
+    while time.monotonic() < deadline:
+        if remote.succeeds("true"):
+            break
+        time.sleep(5)
+    else:
+        sys.exit("server did not come back within 5 minutes")
+
+    step("Waiting for cloudreve after reboot")
+    deadline = time.monotonic() + 5 * 60
+    while time.monotonic() < deadline:
+        state = remote.as_user_systemctl("is-active", "cloudreve.service",
+                                         check=False, capture=True).stdout.strip()
+        if state == "active":
+            break
+        time.sleep(5)
+    status(remote)
+
+
 def status(remote: Remote) -> None:
     remote.as_user_systemctl("status", "--no-pager", "--lines=0", *UNITS, check=False)
     remote.run(
@@ -257,6 +354,7 @@ def main(argv: Sequence[str]) -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("bootstrap", help="one-time host setup")
     sub.add_parser("deploy", help="push config and restart")
+    sub.add_parser("upgrade", help="apply pending OS updates, reboot if required")
     sub.add_parser("status", help="unit and container status")
     logs_p = sub.add_parser("logs", help="follow logs")
     logs_p.add_argument("unit", nargs="?", default="cloudreve", choices=["cloudreve", "caddy"])
@@ -270,6 +368,8 @@ def main(argv: Sequence[str]) -> None:
             bootstrap(remote)
         elif args.command == "deploy":
             deploy(remote)
+        elif args.command == "upgrade":
+            upgrade(remote)
         elif args.command == "status":
             status(remote)
         elif args.command == "logs":

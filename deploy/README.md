@@ -70,12 +70,14 @@ The local policy stays as a fallback; nothing should be written to it after this
 ```sh
 deploy/deploy.py deploy     # after editing anything under host/
 deploy/deploy.py status
+deploy/deploy.py upgrade    # apply pending OS updates now; reboots only if required
 deploy/deploy.py logs       # or: logs caddy
 deploy/deploy.py ssh
 ```
 
 Upgrading Cloudreve: change the image tag in `host/quadlet/cloudreve.container`, then
-`deploy.py deploy`. Database migrations run automatically on start. Take a copy of
+`deploy.py deploy`. `deploy` restarts only units whose files changed; a Caddyfile-only change
+is a live reload, and an unchanged tree touches nothing. Database migrations run automatically on start. Take a copy of
 `/mnt/HC_Volume_107333377/cloudreve/data/cloudreve.db` first (stop the service, copy,
 start; or use `sqlite3 ... ".backup"`).
 
@@ -102,6 +104,27 @@ start; or use `sqlite3 ... ".backup"`).
 - **Full image** (`ghcr.io/dvorinka/cloudreve:<tag>-amd64`) includes ffmpeg, vips,
   LibreOffice, libraw for thumbnails and media metadata. The `-slim-amd64` variant drops
   them; swap the tag if 1 GB of image is unwelcome.
+
+## Exposure and hardening
+
+What is reachable from the internet, and nothing else: `22/tcp` (sshd, keys only), `80/tcp`
+(Caddy, redirects to HTTPS and serves ACME challenges), `443/tcp+udp` (Caddy, HSTS).
+Enforced at two layers: the Hetzner firewall (tofu) drops everything else before it reaches
+the host, and on the host only Caddy publishes ports. Cloudreve's 5212, aria2's 6888 and
+Caddy's admin API 2019 exist only on the private container network.
+
+Host: root login by key only (`PasswordAuthentication no`, `PermitRootLogin
+prohibit-password`, drop-in `/etc/ssh/sshd_config.d/10-hardening.conf`), security updates
+applied daily by unattended-upgrades with an automatic reboot at 04:30 when a kernel or libc
+update needs one, journal capped. Containers are rootless under the `cloudreve` user.
+
+App: registration disabled after the first account. Still on you: enable two-factor
+authentication on the admin account (user menu -> Settings -> Security), and consider the
+login captcha under Settings -> Captcha if the login endpoint starts seeing abuse.
+
+Not done, by choice: no host firewall (ufw) on top of the Hetzner one, no fail2ban (nothing
+to brute-force with keys only), SSH open to any source address. To restrict SSH to a fixed
+address set `ssh_allowed_cidrs` in `tofu/variables.tf`.
 
 ## Not done yet
 
