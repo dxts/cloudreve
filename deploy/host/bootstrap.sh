@@ -3,6 +3,8 @@
 # Run as root on the server: ./deploy.sh bootstrap   (pipes this script over ssh)
 # Idempotent: safe to re-run after changes.
 set -euo pipefail
+# Files written below with `cat >` get 644 from this umask.
+umask 022
 
 APP_USER=cloudreve
 VOLUME_MOUNT=/mnt/HC_Volume_107333377
@@ -43,21 +45,21 @@ install -d -o "$APP_USER" -g "$APP_USER" -m 700 \
     "/home/$APP_USER/.config/containers/systemd"
 
 log "Allowing unprivileged processes to bind ports >= 80 (Caddy runs rootless)"
-install -m 644 /dev/stdin /etc/sysctl.d/90-unprivileged-ports.conf <<'EOF'
+cat > /etc/sysctl.d/90-unprivileged-ports.conf <<'EOF'
 net.ipv4.ip_unprivileged_port_start = 80
 EOF
 sysctl -q --system
 
 log "Capping journal size"
 install -d /etc/systemd/journald.conf.d
-install -m 644 /dev/stdin /etc/systemd/journald.conf.d/50-size.conf <<'EOF'
+cat > /etc/systemd/journald.conf.d/50-size.conf <<'EOF'
 [Journal]
 SystemMaxUse=500M
 EOF
 systemctl restart systemd-journald
 
 log "Enabling unattended security upgrades"
-install -m 644 /dev/stdin /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
