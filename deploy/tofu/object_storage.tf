@@ -62,10 +62,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "blobs" {
     id     = "abort-incomplete-multipart"
     status = "Enabled"
 
-    filter {}
+    # Ceph returns an empty <Prefix/> rather than an empty <Filter/>; declaring it the same
+    # way keeps the provider's post-apply consistency check from spinning forever.
+    prefix = ""
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
+  }
+
+  lifecycle {
+    # AWS-only knob that Ceph neither accepts nor reports; without this every plan
+    # wants to set it.
+    ignore_changes = [transition_default_minimum_object_size]
   }
 }
