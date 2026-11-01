@@ -21,3 +21,14 @@ output "volume_mount" {
 output "firewall_id" {
   value = hcloud_firewall.cloudreve.id
 }
+
+# Values to enter in Cloudreve's admin panel when creating the S3 storage policy.
+output "s3_policy" {
+  value = {
+    endpoint   = "https://${var.s3_location}.your-objectstorage.com"
+    bucket     = aws_s3_bucket.blobs.id
+    region     = var.s3_location
+    path_style = false
+    private    = true
+  }
+}

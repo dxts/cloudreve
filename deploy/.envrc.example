@@ -17,6 +17,14 @@ print(next(x["token"] for x in c["contexts"] if x["name"] == c["active_context"]
 export PORKBUN_API_KEY="pk1_..."
 export PORKBUN_SECRET_KEY="sk1_..."
 
+# Hetzner Object Storage credentials used by tofu to create and configure the bucket.
+# Console -> project -> Security -> S3 Credentials -> Generate credentials. The secret is
+# shown once. Create a SECOND pair, labelled "cloudreve", to paste into Cloudreve's storage
+# policy in the admin panel, so the two can be rotated independently; that pair is never
+# needed on this machine.
+export TF_VAR_hetzner_s3_access_key="..."
+export TF_VAR_hetzner_s3_secret_key="..."
+
 # Deploy target. The server's root user, reachable with the "macbook work" key.
 export DEPLOY_HOST="root@178.105.142.75"
 export DEPLOY_SSH_KEY="$HOME/.ssh/hetzner_ed25519"

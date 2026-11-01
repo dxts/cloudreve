@@ -10,6 +10,10 @@ terraform {
       source  = "cullenmcdermott/porkbun"
       version = "~> 0.3"
     }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
   }
 }
 
