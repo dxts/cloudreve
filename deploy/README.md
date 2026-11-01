@@ -22,9 +22,11 @@ deploy/
 | Volume `volume-nbg1-1` (10 GB) at `/mnt/HC_Volume_107333377` | all persistent state: SQLite DB, uploads, Caddy certs |
 | Storage box `storage-box-1` (1 TiB) | backup target (not wired up yet) |
 
-The server and volume were created by hand and are deliberately *not* managed by tofu,
-so no `tofu destroy` can take data with it. Tofu only owns the firewall and the DNS
-records, which are safe to recreate.
+The server and volume were created in the console and then imported into tofu, so the
+whole cloud layer is in code. Both carry `prevent_destroy` plus Hetzner-side delete and
+rebuild protection: a plan that would replace or delete them fails instead of running.
+State is local (`tofu/terraform.tfstate`, gitignored); back it up or move it to a remote
+backend before a second machine needs to run tofu.
 
 ## First-time setup
 
@@ -80,4 +82,5 @@ start; or use `sqlite3 ... ".backup"`).
 
 - Backups to the storage box (restic over SFTP; the box has SSH enabled).
 - Hetzner server backups / volume snapshots.
+- Remote state backend for tofu (state is a local gitignored file today).
 - Restricting SSH in the firewall to a fixed source address (`ssh_allowed_cidrs`).

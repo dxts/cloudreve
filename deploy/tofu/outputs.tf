@@ -11,7 +11,11 @@ output "ipv6" {
 }
 
 output "server_id" {
-  value = data.hcloud_server.cloudreve.id
+  value = hcloud_server.cloudreve.id
+}
+
+output "volume_mount" {
+  value = "/mnt/HC_Volume_${hcloud_volume.data.id}"
 }
 
 output "firewall_id" {

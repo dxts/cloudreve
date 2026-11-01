@@ -1,5 +1,5 @@
 variable "server_name" {
-  description = "Name of the existing Hetzner Cloud server that runs Cloudreve."
+  description = "Name of the Hetzner Cloud server that runs Cloudreve."
   type        = string
   default     = "ubuntu-4gb-nbg1-1"
 }
