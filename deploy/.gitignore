@@ -7,3 +7,6 @@ tofu/*.tfstate
 tofu/*.tfstate.*
 tofu/*.tfplan
 tofu/crash.log
+
+# Python bytecode from running deploy.py
+__pycache__/

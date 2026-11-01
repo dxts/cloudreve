@@ -10,10 +10,9 @@ bytes and the volume only holds the database.
 deploy/
   .envrc.example        credentials and target, copy to .envrc (gitignored)
   tofu/                 OpenTofu: server, volume, firewall, S3 bucket, Porkbun DNS
-  host/bootstrap.sh     one-time host setup, run over ssh
   host/quadlet/         systemd units for the containers
   host/Caddyfile        reverse proxy config
-  deploy.sh             push config, restart, status, logs
+  deploy.py             bootstrap the host, push config, restart, status, logs (Python 3, stdlib)
 ```
 
 ## What exists in the Hetzner project
@@ -42,10 +41,10 @@ tofu -chdir=deploy/tofu init
 tofu -chdir=deploy/tofu apply
 
 # 2. Host: podman, the `cloudreve` user, data dirs, sysctls
-deploy/deploy.sh bootstrap
+deploy/deploy.py bootstrap
 
 # 3. App: units, Caddyfile, start
-deploy/deploy.sh deploy
+deploy/deploy.py deploy
 ```
 
 Then open <https://drive.offlike.net> and register: the first account becomes the
@@ -69,14 +68,14 @@ The local policy stays as a fallback; nothing should be written to it after this
 ## Day-to-day
 
 ```sh
-deploy/deploy.sh deploy     # after editing anything under host/
-deploy/deploy.sh status
-deploy/deploy.sh logs       # or: logs caddy
-deploy/deploy.sh ssh
+deploy/deploy.py deploy     # after editing anything under host/
+deploy/deploy.py status
+deploy/deploy.py logs       # or: logs caddy
+deploy/deploy.py ssh
 ```
 
 Upgrading Cloudreve: change the image tag in `host/quadlet/cloudreve.container`, then
-`deploy.sh deploy`. Database migrations run automatically on start. Take a copy of
+`deploy.py deploy`. Database migrations run automatically on start. Take a copy of
 `/mnt/HC_Volume_107333377/cloudreve/data/cloudreve.db` first (stop the service, copy,
 start; or use `sqlite3 ... ".backup"`).
 
@@ -84,6 +83,9 @@ start; or use `sqlite3 ... ".backup"`).
 
 - **SQLite + memory cache**: Cloudreve's default when no `[Database]`/`[Redis]` section is
   set. Right size for one household; the DB is one file on the volume.
+- **One tool, nothing installed on the server**: `deploy.py` runs locally and sends every
+  step over ssh, including the bootstrap, so the host only ever needs sshd. Each bootstrap
+  step is idempotent; re-run it after changing anything.
 - **No shipped conf.ini**: Cloudreve generates `data/conf.ini` with a random
   `SessionSecret` on first start. The settings we need are passed as `CR_CONF_*` env
   overrides in the unit, so we never overwrite a file the app owns.
