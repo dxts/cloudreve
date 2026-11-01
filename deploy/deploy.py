@@ -81,13 +81,28 @@ class Remote:
     def succeeds(self, command: str) -> bool:
         return self.run(command, check=False, capture=True).returncode == 0
 
-    def write_file(self, path: str, content: str, mode: str = "644") -> None:
-        """Write a root-owned file atomically (write to a temp file, then move)."""
+    def write_file(self, path: str, content: str, mode: str = "644",
+                   owner: str = "root") -> None:
+        """Write a file atomically (temp file, then move) with the given mode and owner."""
         tmp = f"{path}.tmp"
         q = shlex.quote
         self.run(
-            f"cat > {q(tmp)} && chmod {mode} {q(tmp)} && mv {q(tmp)} {q(path)}",
+            f"cat > {q(tmp)} && chmod {mode} {q(tmp)} && chown {owner}:{owner} {q(tmp)}"
+            f" && mv {q(tmp)} {q(path)}",
             stdin=content,
+        )
+
+    def push_dir(self, source: Path, destination: str, owner: str, mode: str = "644") -> None:
+        """Mirror the files of a local directory (not recursive) into a remote directory,
+        deleting remote files that no longer exist locally."""
+        files = sorted(p for p in source.iterdir() if p.is_file())
+        for path in files:
+            self.write_file(f"{destination}/{path.name}", path.read_text(), mode, owner)
+        keep = " ".join(shlex.quote(p.name) for p in files)
+        self.run(
+            f"cd {shlex.quote(destination)} && for f in *; do"
+            f' case " {keep} " in *" $f "*) ;; *) echo "removing stale $f"; rm -f -- "$f";; esac;'
+            " done"
         )
 
     def as_user_systemctl(self, *args: str, check: bool = True,
@@ -97,20 +112,6 @@ class Remote:
             f"systemctl --user --machine={APP_USER}@ " + shlex.join(args),
             check=check,
             capture=capture,
-        )
-
-    def rsync(self, source: Path, destination: str, *, file_mode: str,
-              dir_mode: str = "700") -> None:
-        """Mirror a local file or directory to the server, owned by the service user."""
-        subprocess.run(
-            [
-                "rsync", "--recursive", "--links", "--times", "--delete",
-                f"--chmod=F{file_mode},D{dir_mode}",
-                f"--chown={APP_USER}:{APP_USER}",
-                "-e", shlex.join(["ssh", "-i", self.key, *SSH_OPTIONS]),
-                str(source), f"{self.host}:{destination}",
-            ],
-            check=True,
         )
 
     def interactive(self, *command: str) -> None:
@@ -150,7 +151,7 @@ def bootstrap(remote: Remote) -> None:
     step("Installing packages")
     remote.run(
         "export DEBIAN_FRONTEND=noninteractive && apt-get update -q"
-        " && apt-get install -y -q podman uidmap passt rsync unattended-upgrades"
+        " && apt-get install -y -q podman uidmap passt unattended-upgrades"
         " && podman --version"
     )
 
@@ -199,8 +200,9 @@ UNITS = ["cloudreve.service", "caddy.service"]
 
 def deploy(remote: Remote) -> None:
     step("Pushing quadlet units and Caddyfile")
-    remote.rsync(HERE / "host" / "quadlet" / "", f"{QUADLET_DIR}/", file_mode="644")
-    remote.rsync(HERE / "host" / "Caddyfile", f"{APP_ROOT}/caddy/Caddyfile", file_mode="644")
+    remote.push_dir(HERE / "host" / "quadlet", QUADLET_DIR, owner=APP_USER)
+    remote.write_file(f"{APP_ROOT}/caddy/Caddyfile", (HERE / "host" / "Caddyfile").read_text(),
+                      owner=APP_USER)
 
     step("Reloading and restarting units")
     remote.as_user_systemctl("daemon-reload")
