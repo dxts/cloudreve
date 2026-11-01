@@ -259,7 +259,10 @@ def deploy(remote: Remote) -> None:
     # Restart only what changed. A quadlet change restarts that unit (a few seconds of
     # downtime for cloudreve; caddy returns 502 meanwhile). A Caddyfile-only change is a
     # live reload with no dropped connections. Nothing changed: leave everything alone.
-    first_run = not remote.succeeds(f"systemctl --user --machine={APP_USER}@ cat cloudreve.service")
+    # `systemctl cat` refuses generator-produced units, so ask for the load state instead.
+    load_state = remote.as_user_systemctl("show", "cloudreve.service", "-p", "LoadState",
+                                          "--value", capture=True).stdout.strip()
+    first_run = load_state != "loaded"
     if changed_units or first_run:
         step(f"Reloading units and restarting: {', '.join(sorted(changed_units)) or 'all (first run)'}")
         remote.as_user_systemctl("daemon-reload")
