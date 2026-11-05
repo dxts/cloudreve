@@ -1,0 +1,14 @@
+# basement configuration on the Hetzner host. Installed to
+# /mnt/HC_Volume_107333377/cloudreve/basement/basement.toml by `deploy.py basement`
+# and mounted read-only into the container.
+
+data_dir = "/var/lib/basement"
+
+[http]
+# Not loopback: Caddy is in another container on the same private network and
+# reaches us by name. The port is never published to the host or the internet.
+listen = "0.0.0.0:8080"
+
+[cloudreve]
+internal_url = "http://cloudreve:5212"
+introspection_ttl = "60s"

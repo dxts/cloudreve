@@ -10,8 +10,9 @@ bytes and the volume only holds the database.
 deploy/
   .envrc.example        credentials and target, copy to .envrc (gitignored)
   tofu/                 OpenTofu: server, volume, firewall, S3 bucket, Porkbun DNS
-  host/quadlet/         systemd units for the containers
-  host/Caddyfile        reverse proxy config
+  host/quadlet/         systemd units for the containers (cloudreve, caddy, basement)
+  host/Caddyfile        reverse proxy config: /api/basement/* -> basement, the rest -> cloudreve
+  host/basement.toml    basement's server-side config
   deploy.py             bootstrap the host, push config, restart, status, logs (Python 3, stdlib)
 ```
 
@@ -81,6 +82,30 @@ is a live reload, and an unchanged tree touches nothing. Database migrations run
 `/mnt/HC_Volume_107333377/cloudreve/data/cloudreve.db` first (stop the service, copy,
 start; or use `sqlite3 ... ".backup"`).
 
+## basement
+
+[basement](https://github.com/dxts/basement) runs next to Cloudreve as a third rootless
+container, same user, same private network (design doc, section 7). Caddy routes
+`/api/basement/*` to it; it validates the SPA's Cloudreve token by introspection against
+`http://cloudreve:5212/api/v4/user/me`. Nothing about the Cloudreve deployment changes.
+
+```sh
+# in the basement repo, once per machine:
+brew install zig && cargo install --locked cargo-zigbuild
+rustup target add x86_64-unknown-linux-musl
+# build a static binary (no libc dependency, ~9 MB) and ship it:
+cargo zigbuild --release --target x86_64-unknown-linux-musl
+cd ../cloudreve && deploy/deploy.py basement    # or --binary <path>
+deploy/deploy.py logs basement
+```
+
+`basement` pushes the unit, config and binary, restarts **only** `basement.service` when one
+of them changed, and live-reloads Caddy if its running config lacks the route. There is no
+registry and no image build on the server: the container is `distroless/static` with the
+binary bind-mounted in, so a redeploy is a 9 MB upload and a two-second restart. The
+binary and `basement.toml` live under `/mnt/HC_Volume_107333377/cloudreve/basement/`; the
+index database under `basement/data/`, which the backups must cover alongside Cloudreve's.
+
 ## Design notes
 
 - **SQLite + memory cache**: Cloudreve's default when no `[Database]`/`[Redis]` section is
@@ -104,6 +129,13 @@ start; or use `sqlite3 ... ".backup"`).
 - **Full image** (`ghcr.io/dvorinka/cloudreve:<tag>-amd64`) includes ffmpeg, vips,
   LibreOffice, libraw for thumbnails and media metadata. The `-slim-amd64` variant drops
   them; swap the tag if 1 GB of image is unwelcome.
+- **Caddyfile is directory-mounted, not file-mounted.** `deploy.py` replaces it atomically
+  (temp file, then `mv`), which gives it a new inode. A single-file bind mount is pinned to
+  the old inode, so `caddy reload` kept re-reading stale config and the first basement route
+  silently never applied. Mounting `caddy/conf/` as `/etc/caddy` follows the rename.
+- **Quadlet `HealthCmd=` on a shell-less image must be the JSON array form.** A plain string
+  is wrapped in `/bin/sh -c`, which does not exist in `distroless/static`, so the probe fails
+  with exit 1 and no output before the binary runs.
 
 ## Exposure and hardening
 

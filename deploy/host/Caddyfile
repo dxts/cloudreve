@@ -1,4 +1,5 @@
-# Installed to /mnt/HC_Volume_107333377/cloudreve/caddy/Caddyfile by deploy.sh.
+# Installed to /mnt/HC_Volume_107333377/cloudreve/caddy/conf/Caddyfile by deploy.py and
+# directory-mounted into the caddy container as /etc/caddy/Caddyfile.
 # SITE_ADDRESS comes from the caddy.container unit.
 
 # Caddy's admin API stays on its default, localhost:2019 inside the container's own network
@@ -15,9 +16,18 @@
 		-Server
 	}
 
-	reverse_proxy cloudreve:5212 {
-		# Do not buffer responses: file downloads and previews stream straight through.
-		flush_interval -1
+	# basement owns its own API namespace (design doc, 7.1). Feature areas it takes over
+	# from Cloudreve later get their /api/v4/<area>/* route added here, one line each.
+	handle /api/basement/* {
+		reverse_proxy basement:8080
+	}
+
+	# Everything else is Cloudreve: its API, the SPA, WebDAV.
+	handle {
+		reverse_proxy cloudreve:5212 {
+			# Do not buffer responses: file downloads and previews stream straight through.
+			flush_interval -1
+		}
 	}
 
 	log {

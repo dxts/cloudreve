@@ -17,7 +17,11 @@ PublishPort=80:80
 PublishPort=443:443
 PublishPort=443:443/udp
 
-Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+# Mount the directory, not the file. deploy.py replaces the Caddyfile atomically (temp file
+# then mv), which changes the inode; a single-file bind mount stays pinned to the old inode
+# and `caddy reload` would re-read stale content forever. A directory mount follows the
+# rename, so a Caddyfile-only deploy is a true zero-downtime reload.
+Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/conf:/etc/caddy:ro
 # Certificates and ACME account live in /data; losing them only costs a re-issue.
 Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/data:/data
 Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/config:/config

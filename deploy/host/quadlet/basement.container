@@ -1,0 +1,58 @@
+# basement: the personal data manager growing next to Cloudreve (design doc, section 7).
+# Runs rootless as the same `cloudreve` user on the same private network, so Caddy reaches
+# it as http://basement:8080 and basement reaches Cloudreve as http://cloudreve:5212 for
+# token introspection.
+#
+# The binary is a static musl build cross-compiled on the laptop and pushed with
+# `deploy.py basement`; the container is only an isolation boundary around it, so there is
+# no registry, no image build on this box, and a redeploy is a file write plus a restart
+# of this unit alone. Cloudreve and Caddy are never touched by a basement deploy.
+
+[Unit]
+Description=basement
+Wants=network-online.target cloudreve.service
+After=network-online.target cloudreve.service
+RequiresMountsFor=/mnt/HC_Volume_107333377
+
+[Container]
+# The binary is static, so the image only needs CA certificates and /etc/passwd; distroless
+# static has exactly that and no shell.
+Image=gcr.io/distroless/static-debian12:latest
+ContainerName=basement
+Network=cloudreve.network
+# Run as the host `cloudreve` user with the same uid inside the container, so the bind
+# mounts below are owned by the process without chowning anything into the subuid range.
+UserNS=keep-id
+User=1000:1000
+
+# The binary and its config, pushed by deploy.py. Read-only inside the container.
+Volume=/mnt/HC_Volume_107333377/cloudreve/basement/bin/basement:/usr/local/bin/basement:ro
+Volume=/mnt/HC_Volume_107333377/cloudreve/basement/basement.toml:/etc/basement/basement.toml:ro
+# Live index database and caches (design doc 6.1: outside the user tree).
+Volume=/mnt/HC_Volume_107333377/cloudreve/basement/data:/var/lib/basement
+
+Environment=TZ=UTC
+Environment=RUST_LOG=info
+Environment=BASEMENT_CONFIG=/etc/basement/basement.toml
+
+# distroless has no entrypoint, so the full command goes here.
+Exec=/usr/local/bin/basement serve
+
+# distroless has no shell, so a plain string (which podman wraps in `/bin/sh -c`) fails
+# before our binary runs; the JSON array form is exec'd directly. No wget/curl either, so
+# the binary's own `check` (config + DB) is the probe; the HTTP health endpoint is what
+# Caddy and the deploy wait on.
+HealthCmd=["/usr/local/bin/basement", "--config", "/etc/basement/basement.toml", "check"]
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=10s
+Notify=healthy
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
