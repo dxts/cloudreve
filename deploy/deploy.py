@@ -616,6 +616,7 @@ TANGLED_REMOTE = "tangled"
 ARTIFACT_COLLECTION = "org.tangled.repo.artifact"
 ARTIFACT_LIMIT = 50 * 1024 * 1024  # documented knot limit per file
 APK_MIME = "application/vnd.android.package-archive"
+USER_AGENT = "cloudreve-deploy/1 (+https://tangled.org/dxts.tngl.sh/cloudreve)"
 
 
 def xrpc(base: str, method: str, *, params: Optional[dict] = None, body: Optional[bytes] = None,
@@ -625,7 +626,8 @@ def xrpc(base: str, method: str, *, params: Optional[dict] = None, body: Optiona
     url = f"{base}/xrpc/{method}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    headers = {"Accept": "application/json"}
+    # The knot sits behind Cloudflare, which rejects urllib's default user agent (error 1010).
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     if body is not None:
         headers["Content-Type"] = content_type
     if token:
@@ -641,7 +643,9 @@ def xrpc(base: str, method: str, *, params: Optional[dict] = None, body: Optiona
 
 
 def did_document(did: str) -> dict:
-    with urllib.request.urlopen(f"https://plc.directory/{did}", timeout=30) as response:
+    request = urllib.request.Request(f"https://plc.directory/{did}",
+                                     headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=30) as response:
         return json.load(response)
 
 
@@ -760,7 +764,7 @@ def tangled_release(tag: str, apk: Path, android_dir: Path, build: bool, replace
         print(f"warning: the APK was built from {commit}, but {tag} is {oid[:12]}")
     if commit.endswith("-dirty"):
         print("warning: the android tree has uncommitted changes")
-    name = f"cloudreve-android-{tag}.apk"
+    name = f"cloudreve-{tag}.apk"  # tags are android-vX.Y.Z, so: cloudreve-android-v1.3.0.apk
     print(f"repo {repo_did}\ntag  {tag} -> {oid}\nfile {name} ({len(content) / 1048576:.1f} MB, {version})")
 
     step(f"Signing in as {handle}")
