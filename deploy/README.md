@@ -94,7 +94,8 @@ debug-signed) and has no directory listing. Caddy sends
 ### Release artifacts on Tangled
 
 ```sh
-export TANGLED_HANDLE=dxts.tngl.sh TANGLED_APP_PASSWORD=...   # app password, not the login password
+deploy/deploy.py tangled-app-password dxts.tngl.sh   # once; prompts for the main password, prints an app password
+export TANGLED_HANDLE=dxts.tngl.sh TANGLED_APP_PASSWORD=...   # the app password, never the login password
 git -C ../android tag -a v1.2.0 -m "Android 1.2.0" && git -C ../android push tangled v1.2.0
 deploy/deploy.py tangled-release v1.2.0 --build --android-dir <android dir>
 ```

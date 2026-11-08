@@ -691,6 +691,25 @@ class TangledSession:
         return xrpc(self.knot, method, token=self.knot_token(method), **kwargs)
 
 
+def tangled_app_password(handle: str, label: str) -> None:
+    """Create an app password on the account's PDS. tangled.org signs in with OAuth and has
+    no page for this, but the PDS speaks the standard API. The main password is read from
+    a hidden prompt and sent only to the PDS; the new app password is printed once."""
+    import getpass
+
+    did = resolve_handle(handle)
+    pds = pds_endpoint(did)
+    print(f"{handle} -> {did} on {pds}")
+    main_password = getpass.getpass(f"main password for {handle}: ")
+    session = xrpc(pds, "com.atproto.server.createSession",
+                   body=json.dumps({"identifier": handle, "password": main_password}).encode())
+    created = xrpc(pds, "com.atproto.server.createAppPassword",
+                   body=json.dumps({"name": label}).encode(), token=session["accessJwt"])
+    print(f"\napp password {created['name']!r} created; it is shown only now:\n")
+    print(f"  export TANGLED_HANDLE={handle} TANGLED_APP_PASSWORD={created['password']}")
+    print("\nRevoke it later with com.atproto.server.revokeAppPassword, or list with listAppPasswords.")
+
+
 def tag_commit(repo_dir: Path, tag: str) -> str:
     """The commit a tag points at, verified to match what the knot has for that tag."""
     local = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "--verify", f"{tag}^{{commit}}"],
@@ -824,6 +843,10 @@ def main(argv: Sequence[str]) -> None:
     rel_p.add_argument("--build", action="store_true", help="run ./gradlew :app:assembleRelease first")
     rel_p.add_argument("--replace", action="store_true",
                        help="delete an artifact of the same name already attached to the tag")
+    pw_p = sub.add_parser("tangled-app-password",
+                          help="create an app password on your PDS for tangled-release")
+    pw_p.add_argument("handle", help="your handle, e.g. dxts.tngl.sh")
+    pw_p.add_argument("--label", default="cloudreve-release", help="name shown in the PDS")
     sub.add_parser("status", help="unit and container status")
     logs_p = sub.add_parser("logs", help="follow logs")
     logs_p.add_argument("unit", nargs="?", default="cloudreve",
@@ -834,6 +857,9 @@ def main(argv: Sequence[str]) -> None:
 
     if args.command == "tangled-release":  # talks to tangled.org only, no ssh
         tangled_release(args.tag, args.apk, args.android_dir, args.build, args.replace)
+        return
+    if args.command == "tangled-app-password":
+        tangled_app_password(args.handle, args.label)
         return
 
     remote = Remote.from_env()
