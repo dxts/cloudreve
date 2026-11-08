@@ -28,3 +28,9 @@ export TF_VAR_hetzner_s3_secret_key="..."
 # Deploy target. The server's root user, reachable with the "macbook work" key.
 export DEPLOY_HOST="root@178.105.142.75"
 export DEPLOY_SSH_KEY="$HOME/.ssh/hetzner_ed25519"
+
+# Tangled release uploads (deploy.py tangled-release). An APP password from your PDS, not
+# the login password: create one with `deploy.py tangled-app-password dxts.tngl.sh`. It can
+# only write records and is revocable on its own.
+export TANGLED_HANDLE="dxts.tngl.sh"
+export TANGLED_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"
