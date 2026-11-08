@@ -9,6 +9,7 @@ needs nothing but sshd. Standard library only, Python 3.9+.
     deploy/deploy.py deploy        push quadlet units + Caddyfile, restart, wait for health
     deploy/deploy.py upgrade       apply pending OS updates now, reboot if required
     deploy/deploy.py status        unit and container status
+    deploy/deploy.py apk [--build]  publish the Android release APK at /apk/ for sideloading
     deploy/deploy.py logs [unit]   follow logs (cloudreve by default, or caddy)
     deploy/deploy.py ssh [cmd...]  shell on the host
 
@@ -19,12 +20,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
+import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -37,6 +42,12 @@ QUADLET_DIR = f"/home/{APP_USER}/.config/containers/systemd"
 # Directory-mounted into the caddy container (see caddy.container for why not the file).
 CADDYFILE = f"{APP_ROOT}/caddy/conf/Caddyfile"
 SITE_URL = "https://drive.offlike.net"
+
+# Android builds, served read-only by Caddy at SITE_URL/apk/ (see host/Caddyfile).
+APK_ROOT = f"{APP_ROOT}/apk"
+APK_KEEP = 5
+ANDROID_DIR = HERE.parent / "android"
+RELEASE_APK = ANDROID_DIR / "app" / "build" / "outputs" / "apk" / "release" / "app-release.apk"
 
 SSH_OPTIONS = [
     "-o", "IdentitiesOnly=yes",
@@ -275,6 +286,8 @@ UNITS = ["cloudreve.service", "caddy.service"]
 
 def deploy(remote: Remote) -> None:
     step("Pushing quadlet units and Caddyfile")
+    # The caddy unit bind-mounts this; podman would create it root-owned otherwise.
+    remote.run(f"install -d -m 755 -o {APP_USER} -g {APP_USER} {APK_ROOT}")
     changed_units = remote.push_dir(HERE / "host" / "quadlet", QUADLET_DIR, owner=APP_USER)
     caddyfile_changed = remote.write_file(
         CADDYFILE, (HERE / "host" / "Caddyfile").read_text(), owner=APP_USER
@@ -446,6 +459,142 @@ def deploy_basement(remote: Remote, binary: Path) -> None:
     status(remote)
 
 
+# --------------------------------------------------------------------------------------
+# Android APK publishing
+# --------------------------------------------------------------------------------------
+
+
+def apk_identity(apk: Path, android_dir: Path) -> tuple[str, int, str]:
+    """(versionName, versionCode, short commit) for the build. aapt2 reads the manifest
+    when the SDK is installed; otherwise fall back to parsing build.gradle.kts."""
+    sdk = Path(os.environ.get("ANDROID_HOME") or Path.home() / "Library/Android/sdk")
+    tools = sorted((sdk / "build-tools").glob("*/aapt2"), reverse=True)
+    name, code = None, None
+    if tools:
+        out = subprocess.run([str(tools[0]), "dump", "badging", str(apk)],
+                             capture_output=True, text=True).stdout
+        m = re.search(r"versionCode='(\d+)' versionName='([^']+)'", out)
+        if m:
+            code, name = int(m.group(1)), m.group(2)
+    if name is None:
+        gradle = (android_dir / "app" / "build.gradle.kts").read_text()
+        name = re.search(r'versionName\s*=\s*"([^"]+)"', gradle).group(1)
+        code = int(re.search(r"versionCode\s*=\s*(\d+)", gradle).group(1))
+    commit = subprocess.run(["git", "-C", str(android_dir), "rev-parse", "--short", "HEAD"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(android_dir), "status", "--porcelain", "--", "."],
+                           capture_output=True, text=True).stdout.strip()
+    return name, code, commit + ("-dirty" if dirty else "")
+
+
+def render_index(builds: list[dict]) -> str:
+    """Phone-friendly page: newest build first, one tap to download."""
+    rows = []
+    for b in builds:
+        rows.append(
+            f'<li><a href="{html.escape(b["file"])}" download>'
+            f'<strong>{html.escape(b["versionName"])}</strong> '
+            f'<code>{html.escape(b["commit"])}</code></a>'
+            f'<small>{b["size"] / 1048576:.1f} MB · {html.escape(b["builtAt"][:16].replace("T", " "))} UTC'
+            f' · sha256 {b["sha256"][:12]}…</small></li>'
+        )
+    items = "\n".join(rows) or "<li>No builds yet.</li>"
+    return f"""<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Cloudreve Android builds</title>
+<style>
+  body {{ font: 17px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; background: #111318; color: #e3e2e6; }}
+  h1 {{ font-size: 22px; font-weight: 500; margin: 0 0 16px; }}
+  ul {{ list-style: none; padding: 0; margin: 0; }}
+  li {{ margin: 0 0 12px; }}
+  a {{ display: block; padding: 16px 20px; border-radius: 20px; background: #1e2128; color: #adc6ff; text-decoration: none; }}
+  li:first-child a {{ background: #adc6ff; color: #002e6a; }}
+  li:first-child a::after {{ content: "  latest"; font-size: 13px; opacity: .8; }}
+  code {{ font-size: 14px; opacity: .8; }}
+  small {{ display: block; padding: 6px 20px 0; color: #8e9099; font-size: 13px; }}
+  p {{ color: #8e9099; font-size: 14px; }}
+</style>
+<h1>Cloudreve Android builds</h1>
+<ul>
+{items}
+</ul>
+<p>Debug-signed: uninstall a Play Store copy before installing. Built from the
+<code>feat/android-ux</code> branch; the commit is in each name.</p>
+"""
+
+
+def publish_apk(remote: Remote, apk: Path, android_dir: Path, build: bool) -> None:
+    """Upload a release APK to the server and regenerate the /apk/ page.
+
+    Keeps the last APK_KEEP builds, names each after its version and commit so the phone
+    always knows what it installed, and never touches cloudreve or caddy: Caddy serves the
+    directory straight from disk, so a new file is live the moment the move lands."""
+    if build:
+        step("Building release APK")
+        subprocess.run(["./gradlew", ":app:assembleRelease", "--console=plain", "-q"],
+                       cwd=android_dir, check=True)
+    if not apk.is_file():
+        sys.exit(f"APK not found at {apk}\nbuild it with: ./gradlew :app:assembleRelease (or pass --build)")
+
+    name, code, commit = apk_identity(apk, android_dir)
+    content = apk.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    filename = f"cloudreve-{name}-{commit}.apk"
+    step(f"Uploading {filename} ({len(content) / 1048576:.1f} MB)")
+    remote.run(f"install -d -m 755 -o {APP_USER} -g {APP_USER} {APK_ROOT}")
+    changed = remote.write_binary(f"{APK_ROOT}/{filename}", content, mode="644", owner=APP_USER)
+    if not changed:
+        print("identical file already published; refreshing the index only")
+
+    # Rebuild the manifest from what is actually on disk, newest first, and prune.
+    listing = remote.output(
+        f"cd {APK_ROOT} && for f in *.apk; do [ -f \"$f\" ] && "
+        f"printf '%s\\t%s\\t%s\\n' \"$f\" \"$(stat -c %s \"$f\")\" \"$(stat -c %Y \"$f\")\"; done"
+    )
+    on_disk = []
+    for line in listing.splitlines():
+        f, size, mtime = line.split("\t")
+        on_disk.append({"file": f, "size": int(size), "mtime": int(mtime)})
+    on_disk.sort(key=lambda b: b["mtime"], reverse=True)
+    for stale in on_disk[APK_KEEP:]:
+        print(f"pruning {stale['file']}")
+        remote.run(f"rm -f {shlex.quote(APK_ROOT + '/' + stale['file'])}")
+    on_disk = on_disk[:APK_KEEP]
+
+    previous = {}
+    old = remote.run(f"cat {APK_ROOT}/latest.json 2>/dev/null; cat {APK_ROOT}/builds.json 2>/dev/null",
+                     check=False, capture=True).stdout
+    for chunk in re.findall(r"\{.*?\}(?=\s*\{|\s*\]|\s*$)", old, re.S):
+        try:
+            b = json.loads(chunk)
+            if "file" in b:
+                previous[b["file"]] = b
+        except json.JSONDecodeError:
+            pass
+
+    builds = []
+    for b in on_disk:
+        if b["file"] == filename:
+            builds.append({"file": filename, "versionName": name, "versionCode": code, "commit": commit,
+                           "size": len(content), "sha256": digest,
+                           "builtAt": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        elif b["file"] in previous:
+            builds.append(previous[b["file"]])
+        else:
+            m = re.match(r"cloudreve-(.+?)-([0-9a-f]{7,}(?:-dirty)?)\.apk$", b["file"])
+            builds.append({"file": b["file"], "versionName": m.group(1) if m else "?", "versionCode": 0,
+                           "commit": m.group(2) if m else "?", "size": b["size"], "sha256": "",
+                           "builtAt": datetime.fromtimestamp(b["mtime"], timezone.utc).isoformat(timespec="seconds")})
+
+    step("Writing index")
+    remote.write_file(f"{APK_ROOT}/builds.json", json.dumps(builds, indent=1) + "\n", owner=APP_USER)
+    remote.write_file(f"{APK_ROOT}/latest.json", json.dumps(builds[0], indent=1) + "\n", owner=APP_USER)
+    remote.write_file(f"{APK_ROOT}/index.html", render_index(builds), owner=APP_USER)
+    print(f"\nOpen {SITE_URL}/apk/ on the phone; direct link: {SITE_URL}/apk/{filename}")
+
+
 def status(remote: Remote) -> None:
     remote.as_user_systemctl("status", "--no-pager", "--lines=0", *UNITS, BASEMENT_UNIT,
                              check=False)
@@ -473,6 +622,12 @@ def main(argv: Sequence[str]) -> None:
     basement_p = sub.add_parser("basement", help="push the basement binary + config, restart only it")
     basement_p.add_argument("--binary", type=Path, default=BASEMENT_BINARY,
                             help=f"static musl build (default: {BASEMENT_BINARY})")
+    apk_p = sub.add_parser("apk", help="publish the Android release APK at /apk/")
+    apk_p.add_argument("--apk", type=Path, default=RELEASE_APK,
+                       help=f"APK to publish (default: {RELEASE_APK})")
+    apk_p.add_argument("--android-dir", type=Path, default=ANDROID_DIR,
+                       help="android project dir, for the version and commit (default: ../android)")
+    apk_p.add_argument("--build", action="store_true", help="run ./gradlew :app:assembleRelease first")
     sub.add_parser("status", help="unit and container status")
     logs_p = sub.add_parser("logs", help="follow logs")
     logs_p.add_argument("unit", nargs="?", default="cloudreve",
@@ -491,6 +646,8 @@ def main(argv: Sequence[str]) -> None:
             upgrade(remote)
         elif args.command == "basement":
             deploy_basement(remote, args.binary)
+        elif args.command == "apk":
+            publish_apk(remote, args.apk, args.android_dir, args.build)
         elif args.command == "status":
             status(remote)
         elif args.command == "logs":

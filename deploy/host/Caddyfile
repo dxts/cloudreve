@@ -22,6 +22,21 @@
 		reverse_proxy basement:8080
 	}
 
+	# Android builds for sideloading, published by `deploy.py apk`. Public, read-only,
+	# no directory listing: only the files the deploy wrote (index.html, latest.json,
+	# the kept APKs) are reachable. The APK is a build of this public repository.
+	redir /apk /apk/ 301
+	handle_path /apk/* {
+		root * /srv/apk
+		@apk path *.apk
+		# Android's browser only offers "Install" for this exact type; the container's
+		# Go mime table does not know .apk.
+		header @apk Content-Type application/vnd.android.package-archive
+		header @apk Cache-Control "no-cache"
+		header /latest.json Cache-Control "no-cache"
+		file_server
+	}
+
 	# Everything else is Cloudreve: its API, the SPA, WebDAV.
 	handle {
 		reverse_proxy cloudreve:5212 {

@@ -76,6 +76,21 @@ deploy/deploy.py logs       # or: logs caddy
 deploy/deploy.py ssh
 ```
 
+### Android builds for the phone
+
+```sh
+deploy/deploy.py apk --build                                    # assembleRelease in ../android, then publish
+deploy/deploy.py apk --apk <path> --android-dir <android dir>   # publish a build from another checkout
+```
+
+Uploads the release APK as `cloudreve-<versionName>-<commit>.apk` to
+`/mnt/HC_Volume_107333377/cloudreve/apk/`, which Caddy serves read-only at
+[drive.offlike.net/apk/](https://drive.offlike.net/apk/): a phone-sized page with the newest
+build on top, `latest.json` for scripts, and the last five APKs. Nothing restarts; Caddy
+reads the directory from disk. The route is public (the APK is a build of this public repo,
+debug-signed) and has no directory listing. Caddy sends
+`application/vnd.android.package-archive` so Chrome offers Install directly.
+
 Upgrading Cloudreve: change the image tag in `host/quadlet/cloudreve.container`, then
 `deploy.py deploy`. `deploy` restarts only units whose files changed; a Caddyfile-only change
 is a live reload, and an unchanged tree touches nothing. Database migrations run automatically on start. Take a copy of

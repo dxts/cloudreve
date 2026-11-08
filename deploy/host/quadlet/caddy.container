@@ -25,6 +25,8 @@ Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/conf:/etc/caddy:ro
 # Certificates and ACME account live in /data; losing them only costs a re-issue.
 Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/data:/data
 Volume=/mnt/HC_Volume_107333377/cloudreve/caddy/config:/config
+# Android builds served at /apk/ (see Caddyfile); written by `deploy.py apk`.
+Volume=/mnt/HC_Volume_107333377/cloudreve/apk:/srv/apk:ro
 
 Environment=SITE_ADDRESS=drive.offlike.net
 
