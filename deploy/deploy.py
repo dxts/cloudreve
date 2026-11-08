@@ -10,6 +10,8 @@ needs nothing but sshd. Standard library only, Python 3.9+.
     deploy/deploy.py upgrade       apply pending OS updates now, reboot if required
     deploy/deploy.py status        unit and container status
     deploy/deploy.py apk [--build]  publish the Android release APK at /apk/ for sideloading
+    deploy/deploy.py tangled-release TAG [--build]
+                                   attach the release APK to a pushed tag on tangled.org
     deploy/deploy.py logs [unit]   follow logs (cloudreve by default, or caddy)
     deploy/deploy.py ssh [cmd...]  shell on the host
 
@@ -28,6 +30,9 @@ import shlex
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -595,6 +600,188 @@ def publish_apk(remote: Remote, apk: Path, android_dir: Path, build: bool) -> No
     print(f"\nOpen {SITE_URL}/apk/ on the phone; direct link: {SITE_URL}/apk/{filename}")
 
 
+# --------------------------------------------------------------------------------------
+# Tangled release artifacts
+#
+# Tangled shows files attached to a tag on the repository page. An attachment is an
+# org.tangled.repo.artifact record in the *repository's* own AT Protocol account, which
+# lives on the knot that hosts the git data. Writing there needs a service-auth token
+# minted by the owner's PDS for that knot, one per XRPC call. This is the same dance the
+# official release workflow does with `goat`, done here with urllib so the release can
+# be cut from a laptop. Needs TANGLED_HANDLE and TANGLED_APP_PASSWORD (an app password,
+# not the account password) in the environment.
+# --------------------------------------------------------------------------------------
+
+TANGLED_REMOTE = "tangled"
+ARTIFACT_COLLECTION = "org.tangled.repo.artifact"
+ARTIFACT_LIMIT = 50 * 1024 * 1024  # documented knot limit per file
+APK_MIME = "application/vnd.android.package-archive"
+
+
+def xrpc(base: str, method: str, *, params: Optional[dict] = None, body: Optional[bytes] = None,
+         content_type: str = "application/json", token: Optional[str] = None) -> dict:
+    """One XRPC call. GET when there is no body, POST otherwise. Errors carry the
+    server's JSON message so an auth or validation failure is readable."""
+    url = f"{base}/xrpc/{method}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = content_type
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=body, headers=headers,
+                                     method="POST" if body is not None else "GET")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as failed:
+        detail = failed.read().decode("utf-8", "replace")
+        sys.exit(f"{method} failed: HTTP {failed.code} {detail.strip()}")
+
+
+def did_document(did: str) -> dict:
+    with urllib.request.urlopen(f"https://plc.directory/{did}", timeout=30) as response:
+        return json.load(response)
+
+
+def pds_endpoint(did: str) -> str:
+    """The #atproto_pds endpoint from a did:plc document. For a repository DID this is the
+    knot that hosts it."""
+    for service in did_document(did).get("service", []):
+        if service.get("id") == "#atproto_pds":
+            return service["serviceEndpoint"].rstrip("/")
+    sys.exit(f"{did} has no #atproto_pds service in its DID document")
+
+
+def resolve_handle(handle: str) -> str:
+    return xrpc("https://public.api.bsky.app", "com.atproto.identity.resolveHandle",
+                params={"handle": handle})["did"]
+
+
+def tangled_repo_did(repo_dir: Path) -> str:
+    """The repository DID, read from the `tangled` git remote
+    (dxts.tngl.sh@tangled.org:did:plc:...)."""
+    url = subprocess.run(["git", "-C", str(repo_dir), "remote", "get-url", TANGLED_REMOTE],
+                         capture_output=True, text=True).stdout.strip()
+    m = re.search(r"(did:plc:[a-z2-7]+)", url)
+    if not m:
+        sys.exit(f"git remote {TANGLED_REMOTE!r} is missing or does not use a did:plc URL: {url!r}")
+    return m.group(1)
+
+
+class TangledSession:
+    """Owner credentials on their PDS, plus per-call service tokens for the knot."""
+
+    def __init__(self, handle: str, app_password: str, repo_did: str) -> None:
+        self.did = resolve_handle(handle)
+        self.pds = pds_endpoint(self.did)
+        self.repo_did = repo_did
+        self.knot = pds_endpoint(repo_did)
+        session = xrpc(self.pds, "com.atproto.server.createSession",
+                       body=json.dumps({"identifier": handle, "password": app_password}).encode())
+        self.access = session["accessJwt"]
+
+    def knot_token(self, method: str) -> str:
+        """Each knot write needs a fresh token scoped to one method (lxm) and the repo."""
+        return xrpc(self.pds, "com.atproto.server.getServiceAuth",
+                    params={"aud": self.repo_did, "lxm": method}, token=self.access)["token"]
+
+    def knot_call(self, method: str, **kwargs) -> dict:
+        return xrpc(self.knot, method, token=self.knot_token(method), **kwargs)
+
+
+def tag_commit(repo_dir: Path, tag: str) -> str:
+    """The commit a tag points at, verified to match what the knot has for that tag."""
+    local = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "--verify", f"{tag}^{{commit}}"],
+                           capture_output=True, text=True)
+    if local.returncode != 0:
+        sys.exit(f"tag {tag!r} does not exist locally; create it with: git tag -a {tag} -m '...'")
+    oid = local.stdout.strip()
+    remote_refs = subprocess.run(
+        ["git", "-C", str(repo_dir), "ls-remote", "--tags", TANGLED_REMOTE,
+         f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}"],
+        capture_output=True, text=True, check=True).stdout
+    remote_oids = {line.split()[0] for line in remote_refs.splitlines() if line.strip()}
+    if not remote_oids:
+        sys.exit(f"tag {tag!r} is not on {TANGLED_REMOTE}; push it with: git push {TANGLED_REMOTE} {tag}")
+    if oid not in remote_oids:
+        sys.exit(f"tag {tag!r} points at {oid[:12]} locally but {TANGLED_REMOTE} has "
+                 f"{', '.join(o[:12] for o in sorted(remote_oids))}; push the tag first")
+    return oid
+
+
+def tangled_release(tag: str, apk: Path, android_dir: Path, build: bool, replace: bool) -> None:
+    """Attach the release APK to TAG on tangled.org.
+
+    Builds the APK if asked, checks the tag is pushed and points at the same commit here
+    and on the knot, uploads the file as a blob and creates the artifact record. Nothing
+    on the Hetzner server is touched."""
+    try:
+        handle, app_password = os.environ["TANGLED_HANDLE"], os.environ["TANGLED_APP_PASSWORD"]
+    except KeyError as missing:
+        sys.exit(f"{missing.args[0]} is not set; create an app password in your PDS settings "
+                 "and export TANGLED_HANDLE and TANGLED_APP_PASSWORD")
+
+    if build:
+        step("Building release APK")
+        subprocess.run(["./gradlew", ":app:assembleRelease", "--console=plain", "-q"],
+                       cwd=android_dir, check=True)
+    if not apk.is_file():
+        sys.exit(f"APK not found at {apk}\nbuild it with: ./gradlew :app:assembleRelease (or pass --build)")
+    content = apk.read_bytes()
+    if len(content) > ARTIFACT_LIMIT:
+        sys.exit(f"{apk} is {len(content) / 1048576:.1f} MB; the knot accepts at most 50 MiB per artifact")
+
+    step(f"Checking tag {tag} on {TANGLED_REMOTE}")
+    repo_did = tangled_repo_did(android_dir)
+    oid = tag_commit(android_dir, tag)
+    version, _code, commit = apk_identity(apk, android_dir)
+    if not oid.startswith(commit.removesuffix("-dirty")):
+        print(f"warning: the APK was built from {commit}, but {tag} is {oid[:12]}")
+    if commit.endswith("-dirty"):
+        print("warning: the android tree has uncommitted changes")
+    name = f"cloudreve-android-{tag}.apk"
+    print(f"repo {repo_did}\ntag  {tag} -> {oid}\nfile {name} ({len(content) / 1048576:.1f} MB, {version})")
+
+    step(f"Signing in as {handle}")
+    session = TangledSession(handle, app_password, repo_did)
+    print(f"knot {session.knot}")
+
+    existing = [
+        r for r in xrpc(session.knot, "com.atproto.repo.listRecords",
+                        params={"repo": repo_did, "collection": ARTIFACT_COLLECTION, "limit": 100})
+        .get("records", [])
+        if r["value"].get("name") == name and r["value"].get("subject", {}).get("oid") == oid
+    ]
+    if existing and not replace:
+        sys.exit(f"{name} is already attached to {tag} ({existing[0]['uri']}); pass --replace to re-upload")
+    for record in existing:
+        rkey = record["uri"].rsplit("/", 1)[1]
+        print(f"deleting previous artifact {rkey}")
+        session.knot_call("com.atproto.repo.deleteRecord",
+                          body=json.dumps({"repo": repo_did, "collection": ARTIFACT_COLLECTION,
+                                           "rkey": rkey}).encode())
+
+    step("Uploading blob to the knot")
+    blob = session.knot_call("com.atproto.repo.uploadBlob", body=content, content_type=APK_MIME)["blob"]
+
+    step("Creating artifact record")
+    record = {
+        "$type": ARTIFACT_COLLECTION,
+        "subject": {"$type": "org.tangled.git.oid", "oid": oid},
+        "name": name,
+        "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "artifact": blob,
+    }
+    created = session.knot_call(
+        "com.atproto.repo.createRecord",
+        body=json.dumps({"repo": repo_did, "collection": ARTIFACT_COLLECTION, "record": record}).encode(),
+    )
+    print(f"\n{created['uri']}\nsha256 {hashlib.sha256(content).hexdigest()}")
+    print(f"Open https://tangled.org/{handle}/cloudreve/tags to see it next to {tag}.")
+
+
 def status(remote: Remote) -> None:
     remote.as_user_systemctl("status", "--no-pager", "--lines=0", *UNITS, BASEMENT_UNIT,
                              check=False)
@@ -628,6 +815,15 @@ def main(argv: Sequence[str]) -> None:
     apk_p.add_argument("--android-dir", type=Path, default=ANDROID_DIR,
                        help="android project dir, for the version and commit (default: ../android)")
     apk_p.add_argument("--build", action="store_true", help="run ./gradlew :app:assembleRelease first")
+    rel_p = sub.add_parser("tangled-release", help="attach the release APK to a pushed tag on tangled.org")
+    rel_p.add_argument("tag", help="an annotated or lightweight tag already pushed to the tangled remote")
+    rel_p.add_argument("--apk", type=Path, default=RELEASE_APK,
+                       help=f"APK to attach (default: {RELEASE_APK})")
+    rel_p.add_argument("--android-dir", type=Path, default=ANDROID_DIR,
+                       help="android project dir, also the git repo the tag lives in (default: ../android)")
+    rel_p.add_argument("--build", action="store_true", help="run ./gradlew :app:assembleRelease first")
+    rel_p.add_argument("--replace", action="store_true",
+                       help="delete an artifact of the same name already attached to the tag")
     sub.add_parser("status", help="unit and container status")
     logs_p = sub.add_parser("logs", help="follow logs")
     logs_p.add_argument("unit", nargs="?", default="cloudreve",
@@ -635,6 +831,10 @@ def main(argv: Sequence[str]) -> None:
     ssh_p = sub.add_parser("ssh", help="shell on the host")
     ssh_p.add_argument("cmd", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+
+    if args.command == "tangled-release":  # talks to tangled.org only, no ssh
+        tangled_release(args.tag, args.apk, args.android_dir, args.build, args.replace)
+        return
 
     remote = Remote.from_env()
     try:

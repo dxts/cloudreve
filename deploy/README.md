@@ -91,6 +91,26 @@ reads the directory from disk. The route is public (the APK is a build of this p
 debug-signed) and has no directory listing. Caddy sends
 `application/vnd.android.package-archive` so Chrome offers Install directly.
 
+### Release artifacts on Tangled
+
+```sh
+export TANGLED_HANDLE=dxts.tngl.sh TANGLED_APP_PASSWORD=...   # app password, not the login password
+git -C ../android tag -a v1.2.0 -m "Android 1.2.0" && git -C ../android push tangled v1.2.0
+deploy/deploy.py tangled-release v1.2.0 --build --android-dir <android dir>
+```
+
+Attaches the release APK to a tag on
+[tangled.org/dxts.tngl.sh/cloudreve](https://tangled.org/dxts.tngl.sh/cloudreve), where it
+shows next to the tag. The tag must already be pushed to the `tangled` remote and point at
+the same commit locally; the command refuses otherwise. Nothing on the server is touched:
+the APK goes to the knot (`knot1.tangled.sh`) as a blob and becomes an
+`org.tangled.repo.artifact` record in the repository's own AT Protocol account, written with
+per-call service tokens from your PDS. The knot accepts up to 50 MiB per file. A second run
+for the same tag stops unless you pass `--replace`.
+
+Why not Tangled CI: the hosted spindle's workflow timeout is 5 minutes, too short for an
+Android build, so builds stay local and only the upload goes to Tangled.
+
 Upgrading Cloudreve: change the image tag in `host/quadlet/cloudreve.container`, then
 `deploy.py deploy`. `deploy` restarts only units whose files changed; a Caddyfile-only change
 is a live reload, and an unchanged tree touches nothing. Database migrations run automatically on start. Take a copy of
