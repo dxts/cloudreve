@@ -12,6 +12,8 @@ needs nothing but sshd. Standard library only, Python 3.9+.
     deploy/deploy.py apk [--build]  publish the Android release APK at /apk/ for sideloading
     deploy/deploy.py tangled-release TAG [--build]
                                    attach the release APK to a pushed tag on tangled.org
+    deploy/deploy.py tangled-set-fork OWNER/NAME
+                                   show our tangled.org repo as a fork of another
     deploy/deploy.py logs [unit]   follow logs (cloudreve by default, or caddy)
     deploy/deploy.py ssh [cmd...]  shell on the host
 
@@ -714,6 +716,55 @@ def tangled_app_password(handle: str, label: str) -> None:
     print("\nRevoke it later with com.atproto.server.revokeAppPassword, or list with listAppPasswords.")
 
 
+def tangled_set_fork(upstream: str, repo_dir: Path) -> None:
+    """Record `upstream` (owner-handle/name on tangled.org) as the source of our
+    repository, which the web UI renders as "forked from".
+
+    The fork relation is the `source` field of the repository's own
+    org.tangled.repo.manifest record; the web UI has no control for it after
+    creation, but the knot accepts a putRecord of the manifest from the owner with
+    every other field carried over. swapRecord pins the version we read, so a
+    concurrent change (a rename in the UI) fails instead of being overwritten."""
+    try:
+        handle, app_password = os.environ["TANGLED_HANDLE"], os.environ["TANGLED_APP_PASSWORD"]
+    except KeyError as missing:
+        sys.exit(f"{missing.args[0]} is not set; see `deploy.py tangled-app-password`")
+    owner_handle, _, name = upstream.partition("/")
+    if not name:
+        sys.exit("upstream must be owner-handle/repo-name, e.g. tdvorak.tngl.sh/cloudreve")
+
+    step(f"Resolving {upstream}")
+    owner_did = resolve_handle(owner_handle)
+    declaration = xrpc(pds_endpoint(owner_did), "com.atproto.repo.getRecord",
+                       params={"repo": owner_did, "collection": "org.tangled.repo.declaration",
+                               "rkey": name.lower()})
+    upstream_did = declaration["value"]["repo"]
+    print(f"{upstream} -> {upstream_did}")
+
+    repo_did = tangled_repo_did(repo_dir)
+    session = TangledSession(handle, app_password, repo_did)
+    current = xrpc(session.knot, "com.atproto.repo.getRecord",
+                   params={"repo": repo_did, "collection": "org.tangled.repo.manifest", "rkey": "self"})
+    manifest = dict(current["value"])
+    previous = manifest.get("source")
+    manifest["source"] = {"$type": "org.tangled.repo.defs#sourceTangled", "did": upstream_did}
+    manifest.pop("x-tngl-editor", None)  # the knot stamps this itself
+    if previous == manifest["source"]:
+        print("already recorded as a fork of that repository; nothing to do")
+        return
+
+    step("Updating the repository manifest")
+    written = session.knot_call(
+        "com.atproto.repo.putRecord",
+        body=json.dumps({"repo": repo_did, "collection": "org.tangled.repo.manifest", "rkey": "self",
+                         "swapRecord": current["cid"], "record": manifest}).encode(),
+    )
+    print(f"{written.get('uri')} -> {written.get('cid')}")
+    print(f"previous source: {previous or 'none'}")
+    ours = manifest["declaration"]["name"]
+    print(f"Open https://tangled.org/{handle}/{ours} to see \"forked from {upstream}\".")
+
+
 def tag_commit(repo_dir: Path, tag: str) -> str:
     """The commit a tag points at, verified to match what the knot has for that tag."""
     local = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "--verify", f"{tag}^{{commit}}"],
@@ -847,6 +898,11 @@ def main(argv: Sequence[str]) -> None:
     rel_p.add_argument("--build", action="store_true", help="run ./gradlew :app:assembleRelease first")
     rel_p.add_argument("--replace", action="store_true",
                        help="delete an artifact of the same name already attached to the tag")
+    fork_p = sub.add_parser("tangled-set-fork",
+                            help="record another tangled.org repo as this one's source (\"forked from\")")
+    fork_p.add_argument("upstream", help="owner-handle/name, e.g. tdvorak.tngl.sh/cloudreve")
+    fork_p.add_argument("--repo-dir", type=Path, default=HERE.parent,
+                        help="a checkout with the `tangled` remote (default: this repo)")
     pw_p = sub.add_parser("tangled-app-password",
                           help="create an app password on your PDS for tangled-release")
     pw_p.add_argument("handle", help="your handle, e.g. dxts.tngl.sh")
@@ -864,6 +920,9 @@ def main(argv: Sequence[str]) -> None:
         return
     if args.command == "tangled-app-password":
         tangled_app_password(args.handle, args.label)
+        return
+    if args.command == "tangled-set-fork":
+        tangled_set_fork(args.upstream, args.repo_dir)
         return
 
     remote = Remote.from_env()

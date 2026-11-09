@@ -112,6 +112,12 @@ for the same tag stops unless you pass `--replace`.
 Why not Tangled CI: the hosted spindle's workflow timeout is 5 minutes, too short for an
 Android build, so builds stay local and only the upload goes to Tangled.
 
+`deploy/deploy.py tangled-set-fork tdvorak.tngl.sh/cloudreve` records the author's Tangled
+repo as our source, so the page shows "forked from". Tangled keeps that relation in the
+`source` field of the repository manifest and offers no UI for it after creation; the
+command rewrites the manifest through the knot with every other field carried over and
+`swapRecord` pinned to the version it read. Idempotent.
+
 Upgrading Cloudreve: change the image tag in `host/quadlet/cloudreve.container`, then
 `deploy.py deploy`. `deploy` restarts only units whose files changed; a Caddyfile-only change
 is a live reload, and an unchanged tree touches nothing. Database migrations run automatically on start. Take a copy of
