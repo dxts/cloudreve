@@ -80,8 +80,12 @@ deploy/deploy.py ssh
 
 ```sh
 deploy/deploy.py apk --build                                    # assembleRelease in ../android, then publish
-deploy/deploy.py apk --apk <path> --android-dir <android dir>   # publish a build from another checkout
+deploy/deploy.py apk --build --android-dir <android dir>         # build and publish from another checkout
+deploy/deploy.py apk --apk <path> --android-dir <android dir>   # publish an APK you built elsewhere
 ```
+
+The commit in the file name is the android dir's `HEAD`; `-dirty` is appended only for
+tracked, uncommitted changes (untracked files such as emulator data don't count).
 
 Uploads the release APK as `cloudreve-<versionName>-<commit>.apk` to
 `/mnt/HC_Volume_107333377/cloudreve/apk/`, which Caddy serves read-only at

@@ -54,7 +54,12 @@ SITE_URL = "https://drive.offlike.net"
 APK_ROOT = f"{APP_ROOT}/apk"
 APK_KEEP = 5
 ANDROID_DIR = HERE.parent / "android"
-RELEASE_APK = ANDROID_DIR / "app" / "build" / "outputs" / "apk" / "release" / "app-release.apk"
+
+
+def release_apk(android_dir: Path) -> Path:
+    return android_dir / "app" / "build" / "outputs" / "apk" / "release" / "app-release.apk"
+
+
 
 SSH_OPTIONS = [
     "-o", "IdentitiesOnly=yes",
@@ -489,7 +494,8 @@ def apk_identity(apk: Path, android_dir: Path) -> tuple[str, int, str]:
         code = int(re.search(r"versionCode\s*=\s*(\d+)", gradle).group(1))
     commit = subprocess.run(["git", "-C", str(android_dir), "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True, check=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", str(android_dir), "status", "--porcelain", "--", "."],
+    # Only tracked changes count: untracked files (emulator data, local.properties) don't ship.
+    dirty = subprocess.run(["git", "-C", str(android_dir), "status", "--porcelain", "--untracked-files=no", "--", "."],
                            capture_output=True, text=True).stdout.strip()
     return name, code, commit + ("-dirty" if dirty else "")
 
@@ -527,8 +533,8 @@ def render_index(builds: list[dict]) -> str:
 <ul>
 {items}
 </ul>
-<p>Debug-signed: uninstall a Play Store copy before installing. Built from the
-<code>feat/android-ux</code> branch; the commit is in each name.</p>
+<p>Debug-signed: uninstall a Play Store copy before installing. Built from
+<code>master</code> (upstream Dvorinka/cloudreve); the commit is in each name.</p>
 """
 
 
@@ -570,16 +576,17 @@ def publish_apk(remote: Remote, apk: Path, android_dir: Path, build: bool) -> No
         remote.run(f"rm -f {shlex.quote(APK_ROOT + '/' + stale['file'])}")
     on_disk = on_disk[:APK_KEEP]
 
+    # Carry over metadata for builds already published; both files are JSON we wrote ourselves.
     previous = {}
-    old = remote.run(f"cat {APK_ROOT}/latest.json 2>/dev/null; cat {APK_ROOT}/builds.json 2>/dev/null",
-                     check=False, capture=True).stdout
-    for chunk in re.findall(r"\{.*?\}(?=\s*\{|\s*\]|\s*$)", old, re.S):
+    for path in (f"{APK_ROOT}/builds.json", f"{APK_ROOT}/latest.json"):
+        raw = remote.run(f"cat {path} 2>/dev/null", check=False, capture=True).stdout
         try:
-            b = json.loads(chunk)
-            if "file" in b:
-                previous[b["file"]] = b
+            loaded = json.loads(raw) if raw.strip() else []
         except json.JSONDecodeError:
-            pass
+            continue
+        for b in loaded if isinstance(loaded, list) else [loaded]:
+            if isinstance(b, dict) and b.get("file") and b.get("sha256"):
+                previous.setdefault(b["file"], b)
 
     builds = []
     for b in on_disk:
@@ -591,8 +598,9 @@ def publish_apk(remote: Remote, apk: Path, android_dir: Path, build: bool) -> No
             builds.append(previous[b["file"]])
         else:
             m = re.match(r"cloudreve-(.+?)-([0-9a-f]{7,}(?:-dirty)?)\.apk$", b["file"])
+            digest_on_disk = remote.output(f"sha256sum {shlex.quote(APK_ROOT + '/' + b['file'])}").split()[0]
             builds.append({"file": b["file"], "versionName": m.group(1) if m else "?", "versionCode": 0,
-                           "commit": m.group(2) if m else "?", "size": b["size"], "sha256": "",
+                           "commit": m.group(2) if m else "?", "size": b["size"], "sha256": digest_on_disk,
                            "builtAt": datetime.fromtimestamp(b["mtime"], timezone.utc).isoformat(timespec="seconds")})
 
     step("Writing index")
@@ -884,15 +892,15 @@ def main(argv: Sequence[str]) -> None:
     basement_p.add_argument("--binary", type=Path, default=BASEMENT_BINARY,
                             help=f"static musl build (default: {BASEMENT_BINARY})")
     apk_p = sub.add_parser("apk", help="publish the Android release APK at /apk/")
-    apk_p.add_argument("--apk", type=Path, default=RELEASE_APK,
-                       help=f"APK to publish (default: {RELEASE_APK})")
+    apk_p.add_argument("--apk", type=Path, default=None,
+                       help="APK to publish (default: the release build under --android-dir)")
     apk_p.add_argument("--android-dir", type=Path, default=ANDROID_DIR,
                        help="android project dir, for the version and commit (default: ../android)")
     apk_p.add_argument("--build", action="store_true", help="run ./gradlew :app:assembleRelease first")
     rel_p = sub.add_parser("tangled-release", help="attach the release APK to a pushed tag on tangled.org")
     rel_p.add_argument("tag", help="an annotated or lightweight tag already pushed to the tangled remote")
-    rel_p.add_argument("--apk", type=Path, default=RELEASE_APK,
-                       help=f"APK to attach (default: {RELEASE_APK})")
+    rel_p.add_argument("--apk", type=Path, default=None,
+                       help="APK to attach (default: the release build under --android-dir)")
     rel_p.add_argument("--android-dir", type=Path, default=ANDROID_DIR,
                        help="android project dir, also the git repo the tag lives in (default: ../android)")
     rel_p.add_argument("--build", action="store_true", help="run ./gradlew :app:assembleRelease first")
@@ -914,6 +922,8 @@ def main(argv: Sequence[str]) -> None:
     ssh_p = sub.add_parser("ssh", help="shell on the host")
     ssh_p.add_argument("cmd", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    if getattr(args, "apk", "absent") is None:  # apk / tangled-release: default follows --android-dir
+        args.apk = release_apk(args.android_dir)
 
     if args.command == "tangled-release":  # talks to tangled.org only, no ssh
         tangled_release(args.tag, args.apk, args.android_dir, args.build, args.replace)
